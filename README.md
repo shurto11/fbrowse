@@ -42,11 +42,12 @@ drmterm の中で起動すると、自動的にそのペインへ描く (判定�
 | ダウンロード | `~/Downloads` |
 | mpv のスクリーンショット | `~/Pictures/fbrowse` |
 
-ssbrowse のログイン状態とお気に入りを引き継ぐなら:
+ssbrowse のログイン状態とお気に入りを引き継ぐなら (fbrowse を終了した状態で):
 
 ```bash
-mkdir -p ~/.local/share/fbrowse ~/.config/fbrowse
-cp -r ~/ssd/ssbrowse/chrome-data ~/.local/share/fbrowse/profile
+mkdir -p ~/.local/share/fbrowse/profile ~/.config/fbrowse
+# 末尾の "/." で中身をコピーする (profile が既にあっても profile/chrome-data にならない)
+cp -r ~/ssd/ssbrowse/chrome-data/. ~/.local/share/fbrowse/profile
 cp ~/ssd/ssbrowse/favorites.json ~/.config/fbrowse/favorites.json
 ```
 
