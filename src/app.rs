@@ -76,8 +76,10 @@ fn key_name(k: &str) -> String {
 }
 
 fn log_action(key: &str, action: &str) {
-    print!("\r\x1b[K[{}] {action}", key_name(key));
+    let line = format!("[{}] {action}", key_name(key));
+    print!("\r\x1b[K{line}");
     let _ = std::io::stdout().flush();
+    crate::status::message(&line);
 }
 
 fn echo(s: &str) {
@@ -172,9 +174,13 @@ impl App {
                         match self.on_key(&k).await {
                             Ok(true) => return,
                             Ok(false) => {}
-                            Err(e) => println!("\r\nエラー: {e}"),
+                            Err(e) => {
+                                println!("\r\nエラー: {e}");
+                                crate::status::message(&format!("エラー: {e}"));
+                            }
                         }
                     }
+                    self.update_prompt();
                 }
                 AppEvent::Touch(t) => self.on_touch(t, rx).await,
                 AppEvent::MpvExited => {
@@ -186,6 +192,25 @@ impl App {
                 AppEvent::PipEnded => self.reset_mpv_state(),
             }
         }
+    }
+
+    /// 入力中のモードを画面のステータス行にも出す(ターミナルが隠れていても分かるように)。
+    fn update_prompt(&self) {
+        let p = if self.mpv_pid.is_some() {
+            None
+        } else {
+            match self.mode {
+                Mode::Insert => Some(format!("-- INSERT -- {}▏  (Enter で確定)", self.input)),
+                Mode::Hint => Some(format!("-- HINT -- {}  (Esc で取消)", self.input)),
+                Mode::TabInput => Some(format!("NEW TAB> {}▏  (Tab で補完 / Esc で取消)", self.input)),
+                Mode::Bookmark => Some(format!("お気に入りの名前> {}▏  (Esc で取消)", self.input)),
+                Mode::Normal if self.cursor_mode => {
+                    Some("-- CURSOR -- hjkl 移動 / Space クリック / d ダブルクリック / m 終了".to_string())
+                }
+                Mode::Normal => None,
+            }
+        };
+        crate::status::set_prompt(p);
     }
 
     /// 文字列をまとめて受け取るモードか。
@@ -436,7 +461,9 @@ impl App {
                     self.input.push_str(&rest);
                     echo(&rest);
                 } else if matches.len() > 1 {
-                    println!("\r\n{}", matches.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  "));
+                    let list = matches.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  ");
+                    println!("\r\n{list}");
+                    crate::status::message(&format!("候補: {list}"));
                     echo(&format!("> {}", self.input));
                 }
             }
@@ -705,6 +732,11 @@ impl App {
             "p" => {
                 let clip = c.read_clipboard().await;
                 log_action(k, "クリップボード表示");
+                crate::status::message(&if clip.is_empty() {
+                    "クリップボードは空です".to_string()
+                } else {
+                    format!("クリップボード: {}", clip.split_whitespace().collect::<Vec<_>>().join(" "))
+                });
                 if clip.is_empty() {
                     println!("\r\n(クリップボードは空です)");
                 } else {

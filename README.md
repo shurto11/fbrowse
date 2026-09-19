@@ -33,6 +33,9 @@ URL を省くとプロンプトが出る。`list` でお気に入りの追加・
 drmterm の中で起動すると、自動的にそのペインへ描く (判定の仕組みは ssbrowse と同じ)。
 このときタッチ操作と fb-server との連携は無効になる。
 
+ブラウザの絵がターミナルを覆っていても分かるよう、入力モード (`-- INSERT --` など) と
+直近の操作ログは画面左下のステータス行にも出る (ログは 4 秒で消える)。
+
 ## ファイルの置き場所
 
 | 用途 | 場所 |
@@ -147,6 +150,7 @@ src/
   display.rs   フレームバッファへの書き込み (回転・clip・drmterm)
   render.rs    JPEG デコード・リサイズ・回転・タブバー・カーソル
   mpv.rs       mpv 再生・IPC・コメント・弾幕
+  status.rs    画面左下のステータス行 (入力モード・操作ログ)
   tmux.rs / drmterm.rs / fbserver.rs / touch.rs / favorites.rs / keys.rs
 assets/
   mpv-comments.lua     コメント・弾幕の描画 (mpv スクリプト。バイナリに埋め込み)

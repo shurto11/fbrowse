@@ -6,7 +6,8 @@
 
 use crate::cdp::{Cdp, Event};
 use crate::display::{Display, Rect};
-use crate::render::{self, Fit};
+use crate::render::{self, Fit, Frame};
+use crate::status;
 use crate::tmux;
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
@@ -71,6 +72,8 @@ pub struct Controller {
     pub disp: Mutex<Display>,
     st: Mutex<State>,
     track: Mutex<Option<Track>>,
+    /// 直前に描いたページの絵(ステータス行を重ねる前)
+    last_clean: Mutex<Option<Frame>>,
     capturing: AtomicBool,
     shoot_again: AtomicBool,
     mpv_busy: AtomicBool,
@@ -82,11 +85,12 @@ pub struct Controller {
 /// 別スレッドから時々呼ばれるログ出力(raw モードでも行頭から書く)。
 pub fn log(msg: &str) {
     println!("\r\x1b[K{msg}");
+    status::message(msg);
 }
 
 impl Controller {
     pub fn new(cdp: Cdp, disp: Display, downloads: PathBuf, pip_dir: PathBuf) -> Arc<Controller> {
-        Arc::new(Controller {
+        let ctrl = Arc::new(Controller {
             cdp,
             tabs: Mutex::new(Tabs::default()),
             disp: Mutex::new(disp),
@@ -109,7 +113,15 @@ impl Controller {
             downloads,
             download_names: Mutex::new(HashMap::new()),
             pip_dir,
-        })
+            last_clean: Mutex::new(None),
+        });
+        let weak = Arc::downgrade(&ctrl);
+        status::set_redraw(move || {
+            if let Some(c) = weak.upgrade() {
+                c.redraw_status();
+            }
+        });
+        ctrl
     }
 
     // ---- 起動・タブ -------------------------------------------------------
@@ -475,8 +487,27 @@ impl Controller {
         if show {
             render::draw_cursor(&mut f, mx, my);
         }
-        self.disp.lock().unwrap().blit(f);
+        *self.last_clean.lock().unwrap() = Some(f.clone());
+        self.show(f);
         Ok(())
+    }
+
+    /// ステータス行を重ねて描く。
+    fn show(&self, mut f: Frame) {
+        if let Some(text) = status::current() {
+            let bottom = if self.tabs.lock().unwrap().list.len() > 1 { render::TAB_H } else { 0 };
+            render::draw_status(&mut f, &text, bottom);
+        }
+        self.disp.lock().unwrap().blit(f);
+    }
+
+    /// ステータス行だけが変わったとき、直前のページの絵に重ね直す(撮り直さない)。
+    fn redraw_status(&self) {
+        let Some(f) = self.last_clean.lock().unwrap().clone() else { return };
+        let (w, h) = self.viewport();
+        if f.w == w && f.h == h {
+            self.show(f);
+        }
     }
 
     async fn capture_jpeg(&self, session: &str) -> Option<Vec<u8>> {

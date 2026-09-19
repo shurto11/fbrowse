@@ -14,6 +14,7 @@ mod fbserver;
 mod keys;
 mod mpv;
 mod render;
+mod status;
 mod tmux;
 mod touch;
 

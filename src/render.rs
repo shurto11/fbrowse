@@ -324,3 +324,28 @@ pub fn draw_cursor(f: &mut Frame, mx: i32, my: i32) {
         }
     }
 }
+
+// ---- ステータス行 ----------------------------------------------------------
+
+const STATUS_PX: f32 = 16.0;
+const STATUS_H: u32 = 24;
+
+/// 左下に半透明の帯でステータス行を重ねる。bottom は下端から空ける高さ(タブバー分)。
+pub fn draw_status(f: &mut Frame, text: &str, bottom: u32) {
+    if f.h < STATUS_H + bottom || f.w < 40 {
+        return;
+    }
+    let max_w = (f.w - 24) as f32;
+    let label = ellipsize(text, STATUS_PX, max_w);
+    let w = ((text_width(&label, STATUS_PX) as u32) + 16).min(f.w);
+    let top = f.h - bottom - STATUS_H;
+    for y in top..top + STATUS_H {
+        for x in 0..w {
+            let i = ((y * f.w + x) * 4) as usize;
+            for k in 0..3 {
+                f.data[i + k] = (f.data[i + k] as u32 * 3 / 10) as u8;
+            }
+        }
+    }
+    draw_text(f, &label, 8.0, (top + STATUS_H - 7) as f32, STATUS_PX, [0xff, 0xff, 0xff], (0, w));
+}
