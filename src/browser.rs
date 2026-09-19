@@ -14,7 +14,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,8 @@ pub struct Controller {
     track: Mutex<Option<Track>>,
     /// 直前に描いたページの絵(ステータス行を重ねる前)
     last_clean: Mutex<Option<Frame>>,
+    /// カーソル移動の世代(止まってから撮り直すため)
+    move_gen: AtomicU64,
     capturing: AtomicBool,
     shoot_again: AtomicBool,
     mpv_busy: AtomicBool,
@@ -107,6 +109,7 @@ impl Controller {
                 fps_start: Instant::now(),
             }),
             track: Mutex::new(None),
+            move_gen: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
             shoot_again: AtomicBool::new(false),
             mpv_busy: AtomicBool::new(false),
@@ -118,7 +121,7 @@ impl Controller {
         let weak = Arc::downgrade(&ctrl);
         status::set_redraw(move || {
             if let Some(c) = weak.upgrade() {
-                c.redraw_status();
+                c.redraw_overlay();
             }
         });
         ctrl
@@ -480,20 +483,20 @@ impl Controller {
                 render::draw_tab_bar(&mut f, &titles, t.cur);
             }
         }
-        let (show, (mx, my)) = {
-            let st = self.st.lock().unwrap();
-            (st.show_cursor, st.mouse)
-        };
-        if show {
-            render::draw_cursor(&mut f, mx, my);
-        }
         *self.last_clean.lock().unwrap() = Some(f.clone());
         self.show(f);
         Ok(())
     }
 
-    /// ステータス行を重ねて描く。
+    /// カーソルとステータス行を重ねて描く。
     fn show(&self, mut f: Frame) {
+        let (show_cursor, (mx, my)) = {
+            let st = self.st.lock().unwrap();
+            (st.show_cursor, st.mouse)
+        };
+        if show_cursor {
+            render::draw_cursor(&mut f, mx, my);
+        }
         if let Some(text) = status::current() {
             let bottom = if self.tabs.lock().unwrap().list.len() > 1 { render::TAB_H } else { 0 };
             render::draw_status(&mut f, &text, bottom);
@@ -501,8 +504,9 @@ impl Controller {
         self.disp.lock().unwrap().blit(f);
     }
 
-    /// ステータス行だけが変わったとき、直前のページの絵に重ね直す(撮り直さない)。
-    fn redraw_status(&self) {
+    /// カーソル位置やステータス行だけが変わったとき、直前のページの絵に
+    /// 重ね直す(撮り直さないので速い)。
+    fn redraw_overlay(&self) {
         let Some(f) = self.last_clean.lock().unwrap().clone() else { return };
         let (w, h) = self.viewport();
         if f.w == w && f.h == h {
@@ -764,8 +768,10 @@ impl Controller {
         Ok(())
     }
 
-    /// silent=true のときは撮り直さない(動画モードは勝手に描かれる)。
-    pub async fn move_by(&self, dx: i32, dy: i32, silent: bool) -> Result<()> {
+    /// カーソルを動かす。撮り直さずに直前の絵へカーソルを描き直し、
+    /// 動きが止まってから 1 回だけ撮り直す(ホバー表示などを反映するため)。
+    /// 長押しのキーリピートでも重くならないようにしている。
+    pub async fn move_by(self: &Arc<Self>, dx: i32, dy: i32) -> Result<()> {
         let (w, h) = self.viewport();
         let (x, y) = {
             let mut st = self.st.lock().unwrap();
@@ -773,9 +779,17 @@ impl Controller {
             st.mouse.1 = (st.mouse.1 + dy).clamp(0, h as i32);
             st.mouse
         };
+        self.redraw_overlay();
         self.mouse("mouseMoved", x, y, 0).await?;
-        if !silent {
-            self.screenshot().await;
+        if !self.is_screencast() {
+            let generation = self.move_gen.fetch_add(1, Ordering::AcqRel) + 1;
+            let me = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if me.move_gen.load(Ordering::Acquire) == generation {
+                    me.screenshot().await;
+                }
+            });
         }
         Ok(())
     }

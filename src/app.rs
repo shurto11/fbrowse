@@ -164,6 +164,10 @@ impl App {
             match ev {
                 AppEvent::Key(bytes) => {
                     let k = String::from_utf8_lossy(&bytes).to_string();
+                    if let Some(d) = self.cursor_delta(&k) {
+                        self.move_cursor(d, rx).await;
+                        continue;
+                    }
                     // 文字入力のモード以外では、まとめて届いた文字("gg" など)を 1 文字ずつ扱う
                     let keys: Vec<String> = if self.takes_text() || k.starts_with('\x1b') || k.chars().count() <= 1 {
                         vec![k]
@@ -192,6 +196,49 @@ impl App {
                 AppEvent::PipEnded => self.reset_mpv_state(),
             }
         }
+    }
+
+    /// カーソルモードの hjkl だけからなる入力なら、その移動量を返す。
+    fn cursor_delta(&self, k: &str) -> Option<(i32, i32)> {
+        if !self.cursor_mode || self.mode != Mode::Normal || self.mpv_pid.is_some() || k.is_empty() {
+            return None;
+        }
+        let mut d = (0, 0);
+        for c in k.chars() {
+            match c {
+                'h' => d.0 -= STEP,
+                'l' => d.0 += STEP,
+                'k' => d.1 -= STEP,
+                'j' => d.1 += STEP,
+                _ => return None,
+            }
+        }
+        Some(d)
+    }
+
+    /// カーソルを動かす。長押しでキーリピートが溜まっていたらまとめて 1 回で動かす。
+    async fn move_cursor(&mut self, mut d: (i32, i32), rx: &mut UnboundedReceiver<AppEvent>) {
+        while let Ok(ev) = rx.try_recv() {
+            let more = match &ev {
+                AppEvent::Key(b) => self.cursor_delta(&String::from_utf8_lossy(b)),
+                _ => None,
+            };
+            match more {
+                Some(m) => d = (d.0 + m.0, d.1 + m.1),
+                None => {
+                    self.backlog.push_back(ev);
+                    break;
+                }
+            }
+        }
+        if let Err(e) = self.ctrl.move_by(d.0, d.1).await {
+            crate::status::message(&format!("エラー: {e}"));
+            return;
+        }
+        // 1 回ごとに画面のメッセージを出すと描き直しが増えるので、端末にだけ出す
+        let (x, y) = self.ctrl.mouse_pos();
+        print!("\r\x1b[Kカーソル移動 ({x}, {y})");
+        let _ = std::io::stdout().flush();
     }
 
     /// 入力中のモードを画面のステータス行にも出す(ターミナルが隠れていても分かるように)。
@@ -523,24 +570,7 @@ impl App {
 
     /// カーソルモードのキー。処理したら true(それ以外はノーマルモードへ回す)。
     async fn cursor_key(&mut self, k: &str) -> Result<bool> {
-        let silent = self.video_mode;
         let action = match k {
-            "h" => {
-                self.ctrl.move_by(-STEP, 0, silent).await?;
-                "←移動"
-            }
-            "j" => {
-                self.ctrl.move_by(0, STEP, silent).await?;
-                "↓移動"
-            }
-            "k" => {
-                self.ctrl.move_by(0, -STEP, silent).await?;
-                "↑移動"
-            }
-            "l" => {
-                self.ctrl.move_by(STEP, 0, silent).await?;
-                "→移動"
-            }
             " " => {
                 self.ctrl.click_here().await?;
                 "クリック"
