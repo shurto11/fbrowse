@@ -1,0 +1,29 @@
+[package]
+name = "fbrowse"
+version = "0.1.0"
+edition = "2021"
+description = "Keyboard-driven Chromium that draws straight into the Linux framebuffer / drmterm pane"
+
+[[bin]]
+name = "fbrowse"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "io-util", "signal", "fs"] }
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+base64 = "0.22"
+zune-jpeg = "0.5"
+zune-core = "0.5"
+fast_image_resize = "5"
+ab_glyph = "0.2"
+tiny-skia = "0.11"
+libc = "0.2"
+rustyline = { version = "15", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
