@@ -35,6 +35,10 @@ enum Mode {
 /// カーソルモードの移動量(px)
 const STEP: i32 = 20;
 
+/// hjkl 1 回ぶんのスクロール量(px)
+const SCROLL_X: f64 = 640.0;
+const SCROLL_Y: f64 = 360.0;
+
 pub struct App {
     ctrl: Arc<Controller>,
     favs: Favorites,
@@ -168,6 +172,10 @@ impl App {
                         self.move_cursor(d, rx).await;
                         continue;
                     }
+                    if let Some(d) = self.scroll_delta(&k) {
+                        self.scroll_keys(&k, d, rx).await;
+                        continue;
+                    }
                     // 文字入力のモード以外では、まとめて届いた文字("gg" など)を 1 文字ずつ扱う
                     let keys: Vec<String> = if self.takes_text() || k.starts_with('\x1b') || k.chars().count() <= 1 {
                         vec![k]
@@ -239,6 +247,64 @@ impl App {
         let (x, y) = self.ctrl.mouse_pos();
         print!("\r\x1b[Kカーソル移動 ({x}, {y})");
         let _ = std::io::stdout().flush();
+    }
+
+    /// ノーマルモードの hjkl だけからなる入力なら、そのスクロール量を返す。
+    fn scroll_delta(&self, k: &str) -> Option<(f64, f64)> {
+        if self.cursor_mode || self.mode != Mode::Normal || self.mpv_pid.is_some() || k.is_empty() {
+            return None;
+        }
+        let mut d = (0.0, 0.0);
+        for c in k.chars() {
+            match c {
+                'h' => d.0 -= SCROLL_X,
+                'l' => d.0 += SCROLL_X,
+                'k' => d.1 -= SCROLL_Y,
+                'j' => d.1 += SCROLL_Y,
+                _ => return None,
+            }
+        }
+        Some(d)
+    }
+
+    /// スクロールする。長押しでキーリピートが溜まっていたらまとめて 1 回で送る
+    /// (1 回ごとに撮り直すと、離したあとも溜まった分のスクロールが続いてしまう)。
+    async fn scroll_keys(&mut self, k: &str, mut d: (f64, f64), rx: &mut UnboundedReceiver<AppEvent>) {
+        self.last_g = false;
+        let mut n = k.chars().count();
+        while let Ok(ev) = rx.try_recv() {
+            let more = match &ev {
+                AppEvent::Key(b) => self.scroll_delta(&String::from_utf8_lossy(b)).map(|m| (m, b.len())),
+                _ => None,
+            };
+            match more {
+                Some((m, len)) => {
+                    d = (d.0 + m.0, d.1 + m.1);
+                    n += len;
+                }
+                None => {
+                    self.backlog.push_back(ev);
+                    break;
+                }
+            }
+        }
+        if let Err(e) = self.ctrl.scroll(d.0, d.1).await {
+            crate::status::message(&format!("エラー: {e}"));
+            return;
+        }
+        let dir = match (d.0.partial_cmp(&0.0), d.1.partial_cmp(&0.0)) {
+            (_, Some(std::cmp::Ordering::Greater)) => "↓",
+            (_, Some(std::cmp::Ordering::Less)) => "↑",
+            (Some(std::cmp::Ordering::Less), _) => "←",
+            (Some(std::cmp::Ordering::Greater), _) => "→",
+            _ => "",
+        };
+        let key = k.chars().next().map(String::from).unwrap_or_default();
+        if n > 1 {
+            log_action(&key, &format!("{dir}スクロール ×{n}"));
+        } else {
+            log_action(&key, &format!("{dir}スクロール"));
+        }
     }
 
     /// 入力中のモードを画面のステータス行にも出す(ターミナルが隠れていても分かるように)。
@@ -598,22 +664,6 @@ impl App {
     async fn normal_key(&mut self, k: &str) -> Result<bool> {
         let c = &self.ctrl;
         match k {
-            "h" => {
-                c.scroll(-640.0, 0.0).await?;
-                log_action(k, "←スクロール");
-            }
-            "j" => {
-                c.scroll(0.0, 360.0).await?;
-                log_action(k, "↓スクロール");
-            }
-            "k" => {
-                c.scroll(0.0, -360.0).await?;
-                log_action(k, "↑スクロール");
-            }
-            "l" => {
-                c.scroll(640.0, 0.0).await?;
-                log_action(k, "→スクロール");
-            }
             "\x1b[A" | "\x1b[B" | "\x1b[C" | "\x1b[D" => {
                 let key = match k {
                     "\x1b[A" => "ArrowUp",

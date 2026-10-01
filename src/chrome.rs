@@ -133,6 +133,8 @@ pub async fn launch(profile: &Path, w: u32, h: u32) -> Result<Chrome> {
             "--disable-popup-blocking",
             "--disable-search-engine-choice-screen",
             "--force-color-profile=srgb",
+            // ホイールのスクロールをアニメーションさせない(直後の撮影が動きの途中にならず、描く回数も減る)
+            "--disable-smooth-scrolling",
             "about:blank",
         ])
         // FBROWSE_CHROME_FLAGS: 追加の起動フラグ(空白区切り)

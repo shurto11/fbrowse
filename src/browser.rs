@@ -66,6 +66,8 @@ pub struct Hint {
     pub href: Option<String>,
 }
 
+type LastSrc = (Vec<u8>, Option<(Vec<String>, usize)>, (u32, u32));
+
 pub struct Controller {
     pub cdp: Cdp,
     tabs: Mutex<Tabs>,
@@ -74,8 +76,12 @@ pub struct Controller {
     track: Mutex<Option<Track>>,
     /// 直前に描いたページの絵(ステータス行を重ねる前)
     last_clean: Mutex<Option<Frame>>,
+    /// last_clean の元になった JPEG・タブバーの内容・大きさ
+    last_src: Mutex<Option<LastSrc>>,
     /// カーソル移動の世代(止まってから撮り直すため)
     move_gen: AtomicU64,
+    /// スクロールの世代(止まってから撮り直すため)
+    scroll_gen: AtomicU64,
     capturing: AtomicBool,
     shoot_again: AtomicBool,
     mpv_busy: AtomicBool,
@@ -110,6 +116,7 @@ impl Controller {
             }),
             track: Mutex::new(None),
             move_gen: AtomicU64::new(0),
+            scroll_gen: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
             shoot_again: AtomicBool::new(false),
             mpv_busy: AtomicBool::new(false),
@@ -117,6 +124,7 @@ impl Controller {
             download_names: Mutex::new(HashMap::new()),
             pip_dir,
             last_clean: Mutex::new(None),
+            last_src: Mutex::new(None),
         });
         let weak = Arc::downgrade(&ctrl);
         status::set_redraw(move || {
@@ -475,15 +483,26 @@ impl Controller {
     /// JPEG を描画領域の大きさに合わせ、タブバーとカーソルを重ねて描く。
     fn present(&self, jpeg: &[u8]) -> Result<()> {
         let (w, h) = self.viewport();
-        let mut f = render::resize(render::decode_jpeg(jpeg)?, w, h, Fit::Fill);
-        {
+        let tabs = {
             let t = self.tabs.lock().unwrap();
-            if t.list.len() > 1 {
-                let titles: Vec<String> = t.list.iter().map(|t| t.title.clone()).collect();
-                render::draw_tab_bar(&mut f, &titles, t.cur);
+            (t.list.len() > 1).then(|| (t.list.iter().map(|t| t.title.clone()).collect::<Vec<_>>(), t.cur))
+        };
+        // 止まってからの撮り直しなどで前と同じ絵なら、デコードせずに使い回す
+        let same = self.last_src.lock().unwrap().as_ref().is_some_and(|(j, t, size)| {
+            j.as_slice() == jpeg && *t == tabs && *size == (w, h)
+        });
+        if same {
+            if let Some(f) = self.last_clean.lock().unwrap().clone() {
+                self.show(f);
+                return Ok(());
             }
         }
+        let mut f = render::resize(render::decode_jpeg(jpeg)?, w, h, Fit::Fill);
+        if let Some((titles, cur)) = &tabs {
+            render::draw_tab_bar(&mut f, titles, *cur);
+        }
         *self.last_clean.lock().unwrap() = Some(f.clone());
+        *self.last_src.lock().unwrap() = Some((jpeg.to_vec(), tabs, (w, h)));
         self.show(f);
         Ok(())
     }
@@ -828,7 +847,7 @@ impl Controller {
         self.after_input().await;
     }
 
-    pub async fn scroll(&self, dx: f64, dy: f64) -> Result<()> {
+    pub async fn scroll(self: &Arc<Self>, dx: f64, dy: f64) -> Result<()> {
         let s = self.cur_session_or_err()?;
         let (x, y) = self.mouse_pos();
         self.cdp
@@ -838,7 +857,20 @@ impl Controller {
                 Some(&s),
             )
             .await?;
-        self.after_input().await;
+        // captureScreenshot は撮る前に描き直させるので、スクロールだけなら描画を待たなくてよい
+        // (ホイールの処理が終わってから応答が返り、スムーズスクロールも切ってある)
+        if !self.is_screencast() {
+            self.screenshot().await;
+            // スクロールで見えてから読み込まれる画像などは、止まってから 1 回だけ撮り直して拾う
+            let generation = self.scroll_gen.fetch_add(1, Ordering::AcqRel) + 1;
+            let me = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if me.scroll_gen.load(Ordering::Acquire) == generation && !me.is_screencast() {
+                    me.screenshot().await;
+                }
+            });
+        }
         Ok(())
     }
 
