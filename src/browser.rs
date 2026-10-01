@@ -203,6 +203,9 @@ impl Controller {
         let s = Some(session.as_str());
         self.cdp.call("Page.enable", json!({}), s).await?;
         let _ = self.cdp.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }), s).await;
+        // <select> の標準ポップアップは別ウィンドウで撮影に写らないので、ページ内のメニューに置き換える
+        let _ = self.cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": SELECT_JS }), s).await;
+        let _ = self.evaluate_in(&session, SELECT_JS).await;
         let (w, h) = self.viewport();
         let _ = self.set_metrics(&session, w, h).await;
         Ok(session)
@@ -1340,3 +1343,63 @@ const HINTS_JS: &str = r#"(() => {
   });
   return hints;
 })()"#;
+
+/// <select> をクリックしたとき、標準のポップアップの代わりにページ内へ選択肢のメニューを出す。
+/// 選ぶと selectedIndex を変えて input / change を発火する(React などのフォームにも届く)。
+const SELECT_JS: &str = r#"(() => {
+  if (window.__fbSelect) return;
+  window.__fbSelect = true;
+  let menu = null;
+  const close = () => { if (menu) { menu.remove(); menu = null; } };
+  const open = s => {
+    close();
+    const zoom = parseFloat(document.documentElement.style.zoom) || 1;
+    const b = s.getBoundingClientRect();
+    const r = { left: b.left / zoom, right: b.right / zoom, top: b.top / zoom, bottom: b.bottom / zoom, width: b.width / zoom };
+    menu = document.createElement('div');
+    const vh = innerHeight / zoom;
+    const below = vh - r.bottom, above = r.top;
+    const max = Math.max(below, above) - 8;
+    menu.style.cssText = `position:fixed;z-index:2147483647;left:${r.left}px;min-width:${r.width}px;
+      max-height:${max}px;overflow-y:auto;background:#fff;color:#000;border:1px solid #888;
+      box-shadow:0 2px 8px rgba(0,0,0,.4);font:14px sans-serif;`;
+    menu.style[below >= above ? 'top' : 'bottom'] = below >= above ? `${r.bottom}px` : `${vh - r.top}px`;
+    Array.from(s.options).forEach((o, i) => {
+      const item = document.createElement('div');
+      item.textContent = o.label || o.text;
+      const sel = i === s.selectedIndex;
+      item.style.cssText = `padding:4px 8px;white-space:pre;cursor:default;
+        ${o.disabled ? 'color:#999;' : ''}${sel ? 'background:#1a73e8;color:#fff;' : ''}`;
+      if (!o.disabled) {
+        item.addEventListener('mouseenter', () => { if (i !== s.selectedIndex) item.style.background = '#e8f0fe'; });
+        item.addEventListener('mouseleave', () => { if (i !== s.selectedIndex) item.style.background = ''; });
+        item.addEventListener('mousedown', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          close();
+          if (s.selectedIndex !== i) {
+            s.selectedIndex = i;
+            s.dispatchEvent(new Event('input', { bubbles: true }));
+            s.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }, true);
+      }
+      menu.appendChild(item);
+      if (sel) setTimeout(() => item.scrollIntoView({ block: 'nearest' }));
+    });
+    document.documentElement.appendChild(menu);
+  };
+  addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (menu && menu.contains(e.target)) return;
+    close();
+    const s = e.target.closest && e.target.closest('select');
+    if (!s || s.multiple || s.size > 1 || s.disabled) return;
+    e.preventDefault();
+    s.focus();
+    open(s);
+  }, true);
+  addEventListener('keydown', e => { if (menu && e.key === 'Escape') { e.preventDefault(); close(); } }, true);
+  addEventListener('scroll', e => { if (menu && !menu.contains(e.target)) close(); }, true);
+  addEventListener('resize', close);
+})();"#;
