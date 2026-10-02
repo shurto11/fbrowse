@@ -76,7 +76,7 @@ fn data_dir() -> PathBuf {
         .join("fbrowse")
 }
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
 
@@ -322,6 +322,7 @@ async fn run(args: Args, url: String, profile: PathBuf, favs: Favorites) -> Resu
         });
     }
 
+    ctrl.set_app_tx(tx.clone());
     let result = async {
         ctrl.start(&url).await?;
         let mut app = App::new(ctrl.clone(), favs, tx.clone());

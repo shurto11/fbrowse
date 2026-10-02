@@ -21,6 +21,17 @@ pub enum AppEvent {
     MpvExited,
     /// tmux ペインの mpv(PiP)が終わった
     PipEnded,
+    /// ページがファイル選択ダイアログを開こうとした(<input type=file> のクリックなど)
+    FileChooser { session: String, node: i64, multiple: bool },
+}
+
+/// 応答待ちのファイル選択ダイアログ。
+struct Chooser {
+    session: String,
+    node: i64,
+    multiple: bool,
+    /// 複数選択で選び終えたファイル
+    picked: Vec<String>,
 }
 
 #[derive(PartialEq)]
@@ -30,6 +41,7 @@ enum Mode {
     Hint,
     TabInput,
     Bookmark,
+    File,
 }
 
 /// カーソルモードの移動量(px)
@@ -60,6 +72,9 @@ pub struct App {
     h_at_left: bool,
     h_at_right: bool,
     backlog: VecDeque<AppEvent>,
+    chooser: Option<Chooser>,
+    /// 前回ファイルを選んだディレクトリ(次のファイル選択の初期値)
+    file_dir: String,
 }
 
 /// キーの表示名。
@@ -118,6 +133,10 @@ pub fn print_help(favs: &Favorites) {
   P             PiP モード切替 (tmux 右ペインで mpv、映像は右下 1/4)
   ?             このヘルプ          Q           終了
 
+ファイル選択 (ページで「ファイルを選択」を押すと FILE> が出ます):
+  Tab           パスを補完          Enter       決定 (複数選択は空 Enter で送信)
+  Esc           取消
+
 お気に入り (起動前のプロンプトで list と入力すると管理できます):"
     );
     for (name, url) in favs {
@@ -148,6 +167,8 @@ impl App {
             h_at_left: true,
             h_at_right: true,
             backlog: VecDeque::new(),
+            chooser: None,
+            file_dir: "~/".to_string(),
         }
     }
 
@@ -202,6 +223,10 @@ impl App {
                     self.ctrl.screenshot().await;
                 }
                 AppEvent::PipEnded => self.reset_mpv_state(),
+                AppEvent::FileChooser { session, node, multiple } => {
+                    self.open_file_chooser(Chooser { session, node, multiple, picked: Vec::new() }).await;
+                    self.update_prompt();
+                }
             }
         }
     }
@@ -317,6 +342,15 @@ impl App {
                 Mode::Hint => Some(format!("-- HINT -- {}  (Esc で取消)", self.input)),
                 Mode::TabInput => Some(format!("NEW TAB> {}▏  (Tab で補完 / Esc で取消)", self.input)),
                 Mode::Bookmark => Some(format!("お気に入りの名前> {}▏  (Esc で取消)", self.input)),
+                Mode::File => {
+                    let n = self.chooser.as_ref().map_or(0, |c| c.picked.len());
+                    let more = if self.chooser.as_ref().is_some_and(|c| c.multiple) {
+                        format!(" / 空 Enter で {n} 件を送信")
+                    } else {
+                        String::new()
+                    };
+                    Some(format!("FILE> {}▏  (Tab で補完{more} / Esc で取消)", self.input))
+                }
                 Mode::Normal if self.cursor_mode => {
                     Some("-- CURSOR -- hjkl 移動 / Space クリック / d ダブルクリック / m 終了".to_string())
                 }
@@ -328,7 +362,7 @@ impl App {
 
     /// 文字列をまとめて受け取るモードか。
     fn takes_text(&self) -> bool {
-        self.mpv_pid.is_none() && matches!(self.mode, Mode::Insert | Mode::TabInput | Mode::Bookmark)
+        self.mpv_pid.is_none() && matches!(self.mode, Mode::Insert | Mode::TabInput | Mode::Bookmark | Mode::File)
     }
 
     fn reset_mpv_state(&mut self) {
@@ -358,6 +392,7 @@ impl App {
             Mode::Hint => self.hint_key(k).await?,
             Mode::TabInput => self.tab_input_key(k).await?,
             Mode::Bookmark => self.bookmark_key(k).await,
+            Mode::File => self.file_key(k).await?,
             Mode::Normal => {
                 if self.cursor_mode && self.cursor_key(k).await? {
                     return Ok(false);
@@ -632,6 +667,117 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    // ---- ファイル選択 -------------------------------------------------------
+
+    async fn open_file_chooser(&mut self, chooser: Chooser) {
+        if self.mpv_pid.is_some() {
+            return;
+        }
+        if self.video_mode {
+            self.ctrl.stop_auto().await;
+        }
+        let what = if chooser.multiple { "ファイル選択 (複数可: 1 件ずつ Enter、空 Enter で送信)" } else { "ファイル選択" };
+        self.chooser = Some(chooser);
+        self.mode = Mode::File;
+        self.input = self.file_dir.clone();
+        println!("\r\n-- {what} -- Tab で補完 / Esc で取消");
+        self.echo_file_input();
+    }
+
+    fn echo_file_input(&self) {
+        echo(&format!("\r\x1b[KFILE> {}", self.input));
+    }
+
+    async fn file_key(&mut self, k: &str) -> Result<()> {
+        match k {
+            "\x1b" => {
+                self.chooser = None;
+                self.mode = Mode::Normal;
+                self.input.clear();
+                echo("\r\x1b[K");
+                log_action(k, "ファイル選択を取消");
+                self.after_mode_exit().await;
+            }
+            "\t" => {
+                let (completed, cands) = complete_path(&self.input);
+                if cands.len() > 1 {
+                    let list = cands.join("  ");
+                    println!("\r\n{list}");
+                    crate::status::message(&format!("候補: {list}"));
+                }
+                self.input = completed;
+                self.echo_file_input();
+            }
+            "\r" | "\n" => {
+                let text = self.input.trim().to_string();
+                let multiple = self.chooser.as_ref().is_some_and(|c| c.multiple);
+                // 複数選択: ファイル名を入れずに Enter で、選んだ分を送る
+                let picked_any = self.chooser.as_ref().is_some_and(|c| !c.picked.is_empty());
+                if multiple && picked_any && (text.is_empty() || text == self.file_dir) {
+                    return self.submit_files(k).await;
+                }
+                if text.is_empty() {
+                    return Ok(());
+                }
+                let path = expand_home(&text);
+                if path.is_dir() {
+                    // ディレクトリなら中を一覧して、続けて選ばせる
+                    self.input = if text.ends_with('/') { text } else { format!("{text}/") };
+                    let (_, cands) = complete_path(&self.input);
+                    println!("\r\n{}", cands.join("  "));
+                    self.echo_file_input();
+                    return Ok(());
+                }
+                if !path.is_file() {
+                    println!("\r\nファイルがありません: {}", path.display());
+                    crate::status::message(&format!("ファイルがありません: {text}"));
+                    self.echo_file_input();
+                    return Ok(());
+                }
+                let full = std::fs::canonicalize(&path).unwrap_or(path);
+                self.file_dir = match text.rfind('/') {
+                    Some(i) => text[..=i].to_string(),
+                    None => "./".to_string(),
+                };
+                let Some(ch) = self.chooser.as_mut() else { return Ok(()) };
+                ch.picked.push(full.to_string_lossy().into_owned());
+                if ch.multiple {
+                    let n = ch.picked.len();
+                    println!("\r\n追加 ({n} 件): {}", full.display());
+                    crate::status::message(&format!("追加 ({n} 件): {text}"));
+                    self.input = self.file_dir.clone();
+                    self.echo_file_input();
+                } else {
+                    self.submit_files(k).await?;
+                }
+            }
+            "\x7f" => {
+                if self.input.pop().is_some() {
+                    echo("\x08 \x08");
+                }
+            }
+            _ if printable(k) => {
+                self.input.push_str(k);
+                echo(k);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn submit_files(&mut self, k: &str) -> Result<()> {
+        self.mode = Mode::Normal;
+        self.input.clear();
+        echo("\r\x1b[K");
+        let Some(ch) = self.chooser.take() else { return Ok(()) };
+        let res = self.ctrl.set_files(&ch.session, ch.node, &ch.picked).await;
+        self.after_mode_exit().await;
+        res?;
+        let names: Vec<&str> = ch.picked.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
+        log_action(k, &format!("ファイルを選択: {}", names.join(", ")));
+        Ok(())
     }
 
     /// カーソルモードのキー。処理したら true(それ以外はノーマルモードへ回す)。
@@ -986,6 +1132,54 @@ impl App {
                 }
             }
             Touch::LongPress => {}
+        }
+    }
+}
+
+/// 先頭の "~" をホームディレクトリに置き換える。
+fn expand_home(s: &str) -> std::path::PathBuf {
+    match s.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => crate::home().join(rest.trim_start_matches('/')),
+        _ => std::path::PathBuf::from(s),
+    }
+}
+
+/// パスを補完する。候補が 1 つならそれで埋め、複数なら共通部分まで埋めて候補名を返す。
+fn complete_path(input: &str) -> (String, Vec<String>) {
+    let (dir, prefix) = match input.rfind('/') {
+        Some(i) => (&input[..=i], &input[i + 1..]),
+        None => ("", input),
+    };
+    let Ok(rd) = std::fs::read_dir(expand_home(if dir.is_empty() { "." } else { dir })) else {
+        return (input.to_string(), Vec::new());
+    };
+    let mut cands: Vec<(String, bool)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
+                return None;
+            }
+            // シンボリックリンクの先がディレクトリでもディレクトリとして扱う
+            let is_dir = e.path().is_dir();
+            Some((name, is_dir))
+        })
+        .collect();
+    cands.sort();
+    match cands.len() {
+        0 => (input.to_string(), Vec::new()),
+        1 => {
+            let (name, is_dir) = &cands[0];
+            (format!("{dir}{name}{}", if *is_dir { "/" } else { "" }), Vec::new())
+        }
+        _ => {
+            let mut common = cands[0].0.clone();
+            for (n, _) in &cands[1..] {
+                let len = common.chars().zip(n.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
+                common.truncate(len);
+            }
+            let names = cands.into_iter().map(|(n, d)| if d { n + "/" } else { n }).collect();
+            (format!("{dir}{common}"), names)
         }
     }
 }

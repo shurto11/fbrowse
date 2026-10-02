@@ -4,6 +4,7 @@
 //! 「スクリーンキャスト(動画モード)」中は Chromium から届くフレームを描き続け、
 //! それ以外は操作のたびにスクリーンショットを撮って描く。
 
+use crate::app::AppEvent;
 use crate::cdp::{Cdp, Event};
 use crate::display::{Display, Rect};
 use crate::render::{self, Fit, Frame};
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub const DEFAULT_URL: &str = "https://www.google.com";
 
@@ -88,6 +90,8 @@ pub struct Controller {
     downloads: PathBuf,
     download_names: Mutex<HashMap<String, String>>,
     pub pip_dir: PathBuf,
+    /// ファイル選択ダイアログをキー操作側へ知らせる先
+    app_tx: Mutex<Option<UnboundedSender<AppEvent>>>,
 }
 
 /// 別スレッドから時々呼ばれるログ出力(raw モードでも行頭から書く)。
@@ -125,6 +129,7 @@ impl Controller {
             pip_dir,
             last_clean: Mutex::new(None),
             last_src: Mutex::new(None),
+            app_tx: Mutex::new(None),
         });
         let weak = Arc::downgrade(&ctrl);
         status::set_redraw(move || {
@@ -133,6 +138,10 @@ impl Controller {
             }
         });
         ctrl
+    }
+
+    pub fn set_app_tx(&self, tx: UnboundedSender<AppEvent>) {
+        *self.app_tx.lock().unwrap() = Some(tx);
     }
 
     // ---- 起動・タブ -------------------------------------------------------
@@ -206,6 +215,8 @@ impl Controller {
         // <select> の標準ポップアップは別ウィンドウで撮影に写らないので、ページ内のメニューに置き換える
         let _ = self.cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": SELECT_JS }), s).await;
         let _ = self.evaluate_in(&session, SELECT_JS).await;
+        // ファイル選択ダイアログも撮影に写らず操作できないので、開かずにイベントで受け取る
+        let _ = self.cdp.call("Page.setInterceptFileChooserDialog", json!({ "enabled": true }), s).await;
         let (w, h) = self.viewport();
         let _ = self.set_metrics(&session, w, h).await;
         Ok(session)
@@ -418,6 +429,16 @@ impl Controller {
                             me.screenshot().await;
                         }
                     });
+                }
+            }
+            "Page.fileChooserOpened" => {
+                let (Some(session), Some(node)) = (ev.session.clone(), p["backendNodeId"].as_i64()) else {
+                    log("ファイル選択: 対象の要素が分かりません");
+                    return;
+                };
+                let multiple = p["mode"] == "selectMultiple";
+                if let Some(tx) = self.app_tx.lock().unwrap().as_ref() {
+                    let _ = tx.send(AppEvent::FileChooser { session, node, multiple });
                 }
             }
             "Browser.downloadWillBegin" => {
@@ -693,6 +714,14 @@ impl Controller {
             bail!("{msg}");
         }
         Ok(r["result"]["value"].clone())
+    }
+
+    /// ファイル選択ダイアログで開かれた <input type=file> にファイルを渡す(change が発火する)。
+    pub async fn set_files(&self, session: &str, node: i64, files: &[String]) -> Result<()> {
+        self.cdp
+            .call("DOM.setFileInputFiles", json!({ "files": files, "backendNodeId": node }), Some(session))
+            .await
+            .map(|_| ())
     }
 
     /// ブラウザが次のフレームを描くまで待つ(描かれない場合に備えて上限つき)。
