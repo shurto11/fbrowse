@@ -43,6 +43,15 @@ pub fn own_session_id() -> Option<String> {
     display("#{session_id}", None).filter(|s| !s.is_empty())
 }
 
+/// 文字列を tmux のペーストバッファへ入れる(prefix+] で貼り付けられる)。
+/// `-w` で set-clipboard 経由のシステムクリップボード(OSC 52)にも送る。
+pub fn copy_buffer(text: &str) -> bool {
+    if !inside() {
+        return false;
+    }
+    run(&["set-buffer", "-w", "--", text]).is_some() || run(&["set-buffer", "--", text]).is_some()
+}
+
 /// 接続中の全 tmux クライアントに画面全体の再描画を要求する。
 pub fn refresh_clients() {
     if !inside() {

@@ -125,6 +125,7 @@ pub fn print_help(favs: &Favorites) {
   t             新しいタブ          ] / [       次 / 前のタブ
   x             タブを閉じる        T           タブを新しい tmux ペインへ移す
   o             お気に入りに追加    p           クリップボード表示
+  y             URL を tmux バッファへコピー (prefix+] で貼り付け)
   c / C         動画モード / 高速動画モード
   M             YouTube を mpv で再生
                   再生中: q=停止 +/-=音量 Space=一時停止 h/l=10秒戻し/送り
@@ -967,6 +968,18 @@ impl App {
                     println!("\r\n(クリップボードは空です)");
                 } else {
                     println!("\r\n--- clipboard ---\n{clip}\n---");
+                }
+            }
+            "y" => {
+                let url = c.current_url().await;
+                if url.is_empty() {
+                    log_action(k, "URLコピー (URL取得失敗)");
+                } else if crate::tmux::copy_buffer(&url) {
+                    log_action(k, &format!("URLをコピー: {url}"));
+                    crate::status::message(&format!("tmux バッファへコピー: {url}"));
+                } else {
+                    log_action(k, &format!("URL (tmux 外のためコピー不可): {url}"));
+                    println!("\r\n{url}");
                 }
             }
             "+" | "=" | "-" | "0" => {
