@@ -215,6 +215,12 @@ impl Controller {
         // <select> の標準ポップアップは別ウィンドウで撮影に写らないので、ページ内のメニューに置き換える
         let _ = self.cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": SELECT_JS }), s).await;
         let _ = self.evaluate_in(&session, SELECT_JS).await;
+        // ページがクリップボードへ書いた文字列を tmux のペーストバッファへも入れる
+        // (バインディングは Runtime を有効にしないと注入されず、bindingCalled も届かない)
+        let _ = self.cdp.call("Runtime.enable", json!({}), s).await;
+        let _ = self.cdp.call("Runtime.addBinding", json!({ "name": COPY_BINDING }), s).await;
+        let _ = self.cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": COPY_JS }), s).await;
+        let _ = self.evaluate_in(&session, COPY_JS).await;
         // ファイル選択ダイアログも撮影に写らず操作できないので、開かずにイベントで受け取る
         let _ = self.cdp.call("Page.setInterceptFileChooserDialog", json!({ "enabled": true }), s).await;
         let (w, h) = self.viewport();
@@ -439,6 +445,18 @@ impl Controller {
                 let multiple = p["mode"] == "selectMultiple";
                 if let Some(tx) = self.app_tx.lock().unwrap().as_ref() {
                     let _ = tx.send(AppEvent::FileChooser { session, node, multiple });
+                }
+            }
+            "Runtime.bindingCalled" if p["name"] == COPY_BINDING => {
+                let text = p["payload"].as_str().unwrap_or_default();
+                if text.is_empty() {
+                    return;
+                }
+                let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if tmux::copy_buffer(text) {
+                    log(&format!("tmux バッファへコピー: {one_line}"));
+                } else {
+                    log(&format!("コピー (tmux 外のためバッファへは入れられません): {one_line}"));
                 }
             }
             "Browser.downloadWillBegin" => {
@@ -1431,4 +1449,42 @@ const SELECT_JS: &str = r#"(() => {
   addEventListener('keydown', e => { if (menu && e.key === 'Escape') { e.preventDefault(); close(); } }, true);
   addEventListener('scroll', e => { if (menu && !menu.contains(e.target)) close(); }, true);
   addEventListener('resize', close);
+})();"#;
+
+/// COPY_JS がコピーされた文字列を渡す Runtime バインディング名。
+const COPY_BINDING: &str = "__fbCopy";
+
+/// クリップボードへの書き込み(navigator.clipboard.writeText / write と copy イベント)を
+/// 横取りして COPY_BINDING へ文字列を渡す。ページの動作自体は変えない。
+const COPY_JS: &str = r#"(() => {
+  if (window.__fbCopyHooked || typeof __fbCopy !== 'function') return;
+  window.__fbCopyHooked = true;
+  const send = __fbCopy;
+  const report = t => { if (typeof t === 'string' && t) send(t); };
+  const cb = navigator.clipboard;
+  if (cb) {
+    const writeText = cb.writeText.bind(cb);
+    // 書き込みが拒否されても(フォーカス無しなど)ページの意図した文字列は送る
+    cb.writeText = t => { report(String(t)); return writeText(t); };
+    const write = cb.write.bind(cb);
+    cb.write = items => {
+      const it = Array.from(items || []).find(i => i.types && i.types.includes('text/plain'));
+      if (it) it.getType('text/plain').then(b => b.text()).then(report, () => {});
+      return write(items);
+    };
+  }
+  // execCommand('copy') や Ctrl+C。ページが setData で差し替えた内容を優先し、
+  // 無ければ選択範囲(input / textarea 内の選択を含む)を送る。
+  addEventListener('copy', e => {
+    let t = '';
+    if (e.defaultPrevented && e.clipboardData) t = e.clipboardData.getData('text/plain');
+    if (!t) {
+      const a = document.activeElement;
+      if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT') && typeof a.selectionStart === 'number') {
+        t = a.value.substring(a.selectionStart, a.selectionEnd);
+      }
+    }
+    if (!t) t = String(getSelection() || '');
+    report(t);
+  });
 })();"#;

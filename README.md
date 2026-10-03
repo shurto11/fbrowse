@@ -77,6 +77,8 @@ cp ~/ssd/ssbrowse/favorites.json ~/.config/fbrowse/favorites.json
 | `?` | キー一覧 |
 | `Q` | 終了 |
 
+ページ内のコピーボタンなどでクリップボードへ書き込まれた文字列も、自動で tmux のペーストバッファへ入る (`prefix+]` で貼り付け)。
+
 ### タブ
 
 | キー | 動作 |
