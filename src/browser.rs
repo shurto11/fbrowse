@@ -39,6 +39,8 @@ struct Tabs {
     pending_new: u32,
     /// 自分で閉じている最中の target
     closing: HashSet<String>,
+    /// 保存を差し替え済みの PDF ビューア(iframe の target)
+    pdf_viewers: HashSet<String>,
 }
 
 struct State {
@@ -403,6 +405,7 @@ impl Controller {
             }
             "Target.targetInfoChanged" => {
                 let info = &p["targetInfo"];
+                self.hook_pdf_viewer(info);
                 let id = info["targetId"].as_str().unwrap_or_default();
                 let mut t = self.tabs.lock().unwrap();
                 if let Some(tab) = t.list.iter_mut().find(|t| t.target == id) {
@@ -446,6 +449,7 @@ impl Controller {
                 let id = p["targetId"].as_str().unwrap_or_default();
                 let removed_cur = {
                     let mut t = self.tabs.lock().unwrap();
+                    t.pdf_viewers.remove(id);
                     if t.closing.remove(id) {
                         return;
                     }
@@ -543,6 +547,35 @@ impl Controller {
             }
         };
         status::set_activity(line);
+    }
+
+    /// PDF ビューアの保存ボタンを、保存ダイアログを出さずに通常のダウンロードにする。
+    /// ダイアログは撮影に写らず操作できないまま開きっぱなしになり、その状態で新しいタブを
+    /// 作ると Chromium が落ちる (SIGSEGV)。ビューアはページとは別の target(iframe)なので、
+    /// 現れたらそこへ直接つないで差し替える。
+    fn hook_pdf_viewer(self: &Arc<Self>, info: &Value) {
+        let url = info["url"].as_str().unwrap_or_default();
+        if info["type"] != "iframe" || !url.starts_with(PDF_VIEWER_URL) {
+            return;
+        }
+        let id = info["targetId"].as_str().unwrap_or_default().to_string();
+        if !self.tabs.lock().unwrap().pdf_viewers.insert(id.clone()) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let res = async {
+                let r = me.cdp.call("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None).await?;
+                let session = r["sessionId"].as_str().ok_or_else(|| anyhow!("sessionId がありません"))?;
+                me.cdp
+                    .call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": PDF_SAVE_JS }), Some(session))
+                    .await?;
+                me.evaluate_in(session, PDF_SAVE_JS).await
+            };
+            if let Err(e) = res.await {
+                log(&format!("PDF ビューアの保存を差し替えられませんでした: {e}"));
+            }
+        });
     }
 
     async fn adopt(self: &Arc<Self>, target: &str) -> Result<()> {
@@ -1555,4 +1588,40 @@ const COPY_JS: &str = r#"(() => {
     if (!t) t = String(getSelection() || '');
     report(t);
   });
+})();"#;
+
+/// Chromium 内蔵の PDF ビューア(拡張機能)の URL。
+const PDF_VIEWER_URL: &str = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/";
+
+/// PDF ビューアは保存ボタンで showSaveFilePicker を呼び、受け取ったファイルへ書き込む。
+/// それを、書き込まれた中身を <a download> で落とす偽物に差し替えて、ダウンロード
+/// (Browser.setDownloadBehavior の保存先と進み具合の表示)に乗せる。
+const PDF_SAVE_JS: &str = r#"(() => {
+  if (window.__fbSaveHooked) return;
+  window.__fbSaveHooked = true;
+  window.showSaveFilePicker = async (opts = {}) => {
+    const name = opts.suggestedName || 'download.pdf';
+    const parts = [];
+    return {
+      kind: 'file',
+      name,
+      async createWritable() {
+        return {
+          // write(blob) と write({ type: 'write', data }) の両方を受ける
+          async write(d) { parts.push(d && typeof d === 'object' && 'data' in d ? d.data : d); },
+          async close() {
+            const url = URL.createObjectURL(new Blob(parts, { type: 'application/pdf' }));
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+          },
+          async abort() {},
+        };
+      },
+    };
+  };
 })();"#;
