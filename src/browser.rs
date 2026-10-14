@@ -1081,7 +1081,9 @@ impl Controller {
     }
 
     pub async fn unmute_all(&self) {
-        let js = "document.querySelectorAll('video, audio').forEach(el => { el.muted = false; })";
+        // open_in_browser_muted が仕掛けた消音し続ける監視を先に止める(残っているとすぐ消音に戻る)
+        let js = "window.__fbrowseMuteObserver?.disconnect(); delete window.__fbrowseMuteObserver; \
+                  document.querySelectorAll('video, audio').forEach(el => { el.muted = false; })";
         for s in self.all_sessions() {
             let _ = self.evaluate_in(&s, js).await;
         }

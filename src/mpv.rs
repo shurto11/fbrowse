@@ -334,16 +334,26 @@ pub async fn play(ctrl: &Arc<Controller>, url: &str, events: UnboundedSender<App
 /// mpv の再生開始を待ってからブラウザも同じ動画を開き(視聴履歴のため)、
 /// 音は消したまま広告を飛ばして止める。
 pub async fn open_in_browser_muted(ctrl: Arc<Controller>, url: String) {
+    let mut playing = false;
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if get("playback-time").await.is_some_and(|v| !v.is_null()) {
+            playing = true;
             break;
         }
     }
+    // mpv がもう居なければ、終了時の unmute_all の後に消音を仕掛けることになるので開かない
+    if !playing && !sock_alive().await {
+        log("mpv が再生を始めなかったため、ブラウザでは開きません");
+        return;
+    }
     log("mpv 再生確認、YouTube 側処理開始");
+    // 後から足される <video> も消音し続ける。YouTube は遷移してもページを作り直さないので、
+    // mpv の終了後に unmute_all が外せるよう window に覚えておく
     let mute = "document.querySelectorAll('video, audio').forEach(v => v.muted = true); \
-                new MutationObserver(() => document.querySelectorAll('video, audio').forEach(v => v.muted = true)) \
-                  .observe(document.documentElement, { childList: true, subtree: true });";
+                window.__fbrowseMuteObserver?.disconnect(); \
+                window.__fbrowseMuteObserver = new MutationObserver(() => document.querySelectorAll('video, audio').forEach(v => v.muted = true)); \
+                window.__fbrowseMuteObserver.observe(document.documentElement, { childList: true, subtree: true });";
     let _ = ctrl.evaluate(mute).await;
     if let Err(e) = ctrl.goto(&url).await {
         log(&format!("{e}"));
