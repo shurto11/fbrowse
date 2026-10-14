@@ -53,6 +53,19 @@ fn screenshot_dir() -> PathBuf {
     dir
 }
 
+/// mpv とコメント取得に使う yt-dlp。tmux から直接立てると ~/.profile を通らず PATH に
+/// ~/.local/bin が無いため、OS 同梱の古い yt-dlp(--remote-components を知らない)を拾ってしまう。
+/// ~/.profile と同じく ~/.local/bin を先に探す。
+fn ytdlp() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let local = PathBuf::from(home).join(".local/bin");
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    if !dirs.contains(&local) {
+        dirs.insert(0, local);
+    }
+    dirs.into_iter().map(|d| d.join("yt-dlp")).find(|p| p.is_file()).unwrap_or_else(|| "yt-dlp".into())
+}
+
 // ---- IPC -------------------------------------------------------------------
 
 /// mpv へコマンドを 1 つ送る(応答は読まない)。
@@ -124,6 +137,7 @@ fn base_args(lua: &Path) -> Vec<String> {
     [
         format!("--input-ipc-server={SOCK}"),
         "--hwdec=no".into(),
+        format!("--script-opts-append=ytdl_hook-ytdl_path={}", ytdlp().display()),
         "--ytdl-format=bestvideo[height<=720][vcodec^=avc]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best".into(),
         format!("--ytdl-raw-options-append=cookies={COOKIES}"),
         "--ytdl-raw-options-append=js-runtimes=node".into(),
@@ -368,7 +382,7 @@ pub async fn skip_ads_and_pause(ctrl: Arc<Controller>) {
 fn fetch_comments(url: String) {
     let _ = std::fs::write(COMMENTS, "[]");
     tokio::spawn(async move {
-        let out = Command::new("yt-dlp")
+        let out = Command::new(ytdlp())
             .args([
                 "--skip-download",
                 "--write-comments",
