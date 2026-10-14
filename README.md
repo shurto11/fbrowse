@@ -39,11 +39,14 @@ PDF などのダウンロード中は、その上の行に `ダウンロード�
 進み具合が出続ける (終わると消え、保存先がログに出る)。
 ページ内や PDF タブに出る PDF ビューアの保存ボタン (⬇) も、保存ダイアログを出さずに `~/Downloads` へ保存する。
 
+Chromium が落ちたときは fbrowse も終了し、終わり方 (シグナルなど) とログの場所を表示する。
+
 ## ファイルの置き場所
 
 | 用途 | 場所 |
 |------|------|
 | Chromium のプロファイル | `~/.local/share/fbrowse/profile` (`--profile` で変更可) |
+| Chromium のログ (stderr) | プロファイル直下の `chrome.log` (起動ごとに上書き) |
 | お気に入り | `~/.config/fbrowse/favorites.json` |
 | ダウンロード | `~/Downloads` |
 | mpv のスクリーンショット | `~/Pictures/fbrowse` |

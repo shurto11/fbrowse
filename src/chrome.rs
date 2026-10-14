@@ -3,15 +3,19 @@
 //! Chromium は headful で動かす(音声・クリップボード・フォーカスが素直に動くため)。
 //! 表示先の X サーバは自前で Xvfb を立て、終了時に一緒に片付ける。
 //! DevTools のポートはプロファイル直下の `DevToolsActivePort` から読む。
+//! Chromium の stderr(落ちたときのスタックなど)はプロファイル直下の `chrome.log` に残す。
 
 use anyhow::{bail, Context, Result};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 
 pub struct Chrome {
     pub ws_url: String,
+    /// Chromium の stderr の保存先
+    log: PathBuf,
     chrome: Child,
     xvfb: Option<Child>,
 }
@@ -23,6 +27,33 @@ impl Chrome {
         if let Some(x) = self.xvfb.as_mut() {
             let _ = x.kill().await;
         }
+    }
+
+    /// Chromium が終了するまで待ち、終わり方を説明する文を返す。
+    pub async fn wait_exit(&mut self) -> String {
+        match self.chrome.wait().await {
+            Ok(st) if st.success() => "Chromium が終了しました".to_string(),
+            Ok(st) => format!("Chromium が異常終了しました ({})。ログ: {}", describe(st), self.log.display()),
+            Err(e) => format!("Chromium の終了を待てませんでした: {e}"),
+        }
+    }
+}
+
+fn describe(st: ExitStatus) -> String {
+    match st.signal() {
+        Some(sig) => {
+            let name = match sig {
+                libc::SIGILL => "SIGILL",
+                libc::SIGTRAP => "SIGTRAP",
+                libc::SIGABRT => "SIGABRT",
+                libc::SIGKILL => "SIGKILL",
+                libc::SIGSEGV => "SIGSEGV",
+                libc::SIGTERM => "SIGTERM",
+                _ => "?",
+            };
+            format!("シグナル {sig} {name}")
+        }
+        None => format!("終了コード {}", st.code().unwrap_or(-1)),
     }
 }
 
@@ -106,6 +137,9 @@ pub async fn launch(profile: &Path, w: u32, h: u32) -> Result<Chrome> {
         .with_context(|| format!("プロファイルを作れません: {}", profile.display()))?;
     let port_file = profile.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
+    let log_path = profile.join("chrome.log");
+    let log = std::fs::File::create(&log_path)
+        .with_context(|| format!("ログを作れません: {}", log_path.display()))?;
 
     let (xvfb, display) = start_xvfb(w.max(640), h.max(480)).await?;
 
@@ -141,7 +175,7 @@ pub async fn launch(profile: &Path, w: u32, h: u32) -> Result<Chrome> {
         .args(std::env::var("FBROWSE_CHROME_FLAGS").unwrap_or_default().split_whitespace())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(log)
         .kill_on_drop(true);
     let mut chrome = cmd
         .spawn()
@@ -153,7 +187,7 @@ pub async fn launch(profile: &Path, w: u32, h: u32) -> Result<Chrome> {
             let mut lines = text.lines();
             if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
                 let ws_url = format!("ws://127.0.0.1:{}{}", port.trim(), path.trim());
-                return Ok(Chrome { ws_url, chrome, xvfb: Some(xvfb) });
+                return Ok(Chrome { ws_url, log: log_path, chrome, xvfb: Some(xvfb) });
             }
         }
         if let Some(st) = chrome.try_wait()? {

@@ -336,14 +336,19 @@ async fn run(args: Args, url: String, profile: PathBuf, favs: Favorites) -> Resu
 
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-        tokio::select! {
-            _ = app.run(&mut rx) => {}
-            _ = term.recv() => {}
-            _ = hup.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
+        // Chromium が落ちたら、どの操作も「DevTools との接続が切れました」になるだけなので一緒に終わる
+        let chrome_exit = tokio::select! {
+            _ = app.run(&mut rx) => None,
+            _ = term.recv() => None,
+            _ = hup.recv() => None,
+            _ = tokio::signal::ctrl_c() => None,
+            msg = chrome.wait_exit() => Some(msg),
+        };
         restore_mode(&saved);
         println!();
+        if let Some(msg) = chrome_exit {
+            anyhow::bail!("{msg}");
+        }
         anyhow::Ok(())
     }
     .await;
