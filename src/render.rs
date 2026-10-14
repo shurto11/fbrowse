@@ -328,7 +328,7 @@ pub fn draw_cursor(f: &mut Frame, mx: i32, my: i32) {
 // ---- ステータス行 ----------------------------------------------------------
 
 const STATUS_PX: f32 = 16.0;
-const STATUS_H: u32 = 24;
+pub const STATUS_H: u32 = 24;
 
 /// 左下に半透明の帯でステータス行を重ねる。bottom は下端から空ける高さ(タブバー分)。
 pub fn draw_status(f: &mut Frame, text: &str, bottom: u32) {

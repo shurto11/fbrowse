@@ -4,6 +4,7 @@
 //! ターミナルに出す「-- INSERT --」や操作ログが見えない。そこで入力中の
 //! プロンプトと直近のメッセージをフレームにも描く。
 //! プロンプト(入力モード中ずっと出す)がメッセージ(数秒で消える)より優先。
+//! ダウンロードのような進行中の作業は別の行として、終わるまでその上に出す。
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -14,10 +15,11 @@ const MSG_TTL: Duration = Duration::from_secs(4);
 struct State {
     prompt: Option<String>,
     msg: Option<(String, Instant)>,
+    activity: Option<String>,
     generation: u64,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { prompt: None, msg: None, generation: 0 });
+static STATE: Mutex<State> = Mutex::new(State { prompt: None, msg: None, activity: None, generation: 0 });
 static REDRAW: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// 表示内容が変わったときに呼ぶ再描画関数を登録する。
@@ -38,6 +40,23 @@ pub fn current() -> Option<String> {
         return Some(p.clone());
     }
     s.msg.as_ref().filter(|(_, t)| t.elapsed() < MSG_TTL).map(|(m, _)| m.clone())
+}
+
+/// 進行中の作業を表す 1 行(無ければ None)。
+pub fn activity() -> Option<String> {
+    STATE.lock().unwrap().activity.clone()
+}
+
+/// 進行中の作業(ダウンロードなど)の表示を設定する(None で消す)。
+pub fn set_activity(a: Option<String>) {
+    {
+        let mut s = STATE.lock().unwrap();
+        if s.activity == a {
+            return;
+        }
+        s.activity = a;
+    }
+    redraw();
 }
 
 /// 入力モードのプロンプトを設定する(None で消す)。

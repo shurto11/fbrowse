@@ -70,6 +70,40 @@ pub struct Hint {
 
 type LastSrc = (Vec<u8>, Option<(Vec<String>, usize)>, (u32, u32));
 
+/// 進行中のダウンロード
+struct Download {
+    guid: String,
+    name: String,
+    received: f64,
+    /// 全体の大きさ(分からなければ 0)
+    total: f64,
+}
+
+impl Download {
+    fn progress(&self) -> String {
+        if self.total > 0.0 {
+            let pct = (self.received * 100.0 / self.total).floor();
+            format!("{} {pct}% ({} / {})", self.name, human_size(self.received), human_size(self.total))
+        } else {
+            format!("{} {}", self.name, human_size(self.received))
+        }
+    }
+}
+
+fn human_size(bytes: f64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let (mut v, mut u) = (bytes, 0);
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{v:.0} {}", UNITS[u])
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
 pub struct Controller {
     pub cdp: Cdp,
     tabs: Mutex<Tabs>,
@@ -88,7 +122,8 @@ pub struct Controller {
     shoot_again: AtomicBool,
     mpv_busy: AtomicBool,
     downloads: PathBuf,
-    download_names: Mutex<HashMap<String, String>>,
+    /// 進行中のダウンロード(始まった順)
+    active_downloads: Mutex<Vec<Download>>,
     pub pip_dir: PathBuf,
     /// ファイル選択ダイアログをキー操作側へ知らせる先
     app_tx: Mutex<Option<UnboundedSender<AppEvent>>>,
@@ -125,7 +160,7 @@ impl Controller {
             shoot_again: AtomicBool::new(false),
             mpv_busy: AtomicBool::new(false),
             downloads,
-            download_names: Mutex::new(HashMap::new()),
+            active_downloads: Mutex::new(Vec::new()),
             pip_dir,
             last_clean: Mutex::new(None),
             last_src: Mutex::new(None),
@@ -462,23 +497,52 @@ impl Controller {
             "Browser.downloadWillBegin" => {
                 let guid = p["guid"].as_str().unwrap_or_default().to_string();
                 let name = p["suggestedFilename"].as_str().unwrap_or_default().to_string();
-                self.download_names.lock().unwrap().insert(guid, name);
+                log(&format!("ダウンロード開始: {name}"));
+                self.active_downloads.lock().unwrap().push(Download { guid, name, received: 0.0, total: 0.0 });
+                self.show_downloads();
             }
             "Browser.downloadProgress" => {
                 let guid = p["guid"].as_str().unwrap_or_default();
                 let state = p["state"].as_str().unwrap_or_default();
-                if state == "completed" || state == "canceled" {
-                    let name = self.download_names.lock().unwrap().remove(guid).unwrap_or_default();
-                    let path = self.downloads.join(&name);
-                    if state == "completed" {
-                        log(&format!("ダウンロード完了: {}", path.display()));
+                let finished = {
+                    let mut list = self.active_downloads.lock().unwrap();
+                    let Some(i) = list.iter().position(|d| d.guid == guid) else { return };
+                    if state == "completed" || state == "canceled" {
+                        Some(list.remove(i))
                     } else {
-                        log(&format!("ダウンロード失敗: {name}"));
+                        list[i].received = p["receivedBytes"].as_f64().unwrap_or(0.0);
+                        list[i].total = p["totalBytes"].as_f64().unwrap_or(0.0);
+                        None
+                    }
+                };
+                self.show_downloads();
+                if let Some(d) = finished {
+                    if state == "completed" {
+                        log(&format!("ダウンロード完了: {}", self.downloads.join(&d.name).display()));
+                    } else {
+                        log(&format!("ダウンロード失敗: {}", d.name));
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    /// 進行中のダウンロードをステータス行の上に出す(無くなったら消す)。
+    fn show_downloads(&self) {
+        let line = {
+            let list = self.active_downloads.lock().unwrap();
+            match list.as_slice() {
+                [] => None,
+                [d] => Some(format!("ダウンロード中: {}", d.progress())),
+                all => Some(format!(
+                    "ダウンロード中 ({} 件): {}",
+                    all.len(),
+                    all.iter().map(Download::progress).collect::<Vec<_>>().join(" / ")
+                )),
+            }
+        };
+        status::set_activity(line);
     }
 
     async fn adopt(self: &Arc<Self>, target: &str) -> Result<()> {
@@ -558,9 +622,11 @@ impl Controller {
         if show_cursor {
             render::draw_cursor(&mut f, mx, my);
         }
-        if let Some(text) = status::current() {
-            let bottom = if self.tabs.lock().unwrap().list.len() > 1 { render::TAB_H } else { 0 };
+        // プロンプトや操作ログを一番下に、ダウンロードなどの進行中の作業はその上に積む
+        let mut bottom = if self.tabs.lock().unwrap().list.len() > 1 { render::TAB_H } else { 0 };
+        for text in [status::current(), status::activity()].into_iter().flatten() {
             render::draw_status(&mut f, &text, bottom);
+            bottom += render::STATUS_H;
         }
         self.disp.lock().unwrap().blit(f);
     }
