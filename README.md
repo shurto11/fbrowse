@@ -37,7 +37,7 @@ drmterm の中で起動すると、自動的にそのペインへ描く (判定�
 直近の操作ログは画面左下のステータス行にも出る (ログは 4 秒で消える)。
 PDF などのダウンロード中は、その上の行に `ダウンロード中: report.pdf 56% (1.7 MB / 3.0 MB)` のような
 進み具合が出続ける (終わると消え、保存先がログに出る)。
-ページ内や PDF タブに出る PDF ビューアの保存ボタン (⬇) も、保存ダイアログを出さずに `~/Downloads` へ保存する。
+ページ内や PDF タブに出る PDF ビューアの保存ボタン (⬇) も、保存ダイアログを出さずに `~/ssd/downloads` へ保存する。
 
 Chromium が落ちたときは fbrowse も終了し、終わり方 (シグナルなど) とログの場所を表示する。
 
@@ -48,7 +48,7 @@ Chromium が落ちたときは fbrowse も終了し、終わり方 (シグナル
 | Chromium のプロファイル | `~/.local/share/fbrowse/profile` (`--profile` で変更可) |
 | Chromium のログ (stderr) | プロファイル直下の `chrome.log` (起動ごとに上書き) |
 | お気に入り | `~/.config/fbrowse/favorites.json` |
-| ダウンロード | `~/Downloads` |
+| ダウンロード | `~/ssd/downloads` |
 | mpv のスクリーンショット | `~/Pictures/fbrowse` |
 
 ssbrowse のログイン状態とお気に入りを引き継ぐなら (fbrowse を終了した状態で):

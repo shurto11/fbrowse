@@ -285,7 +285,7 @@ async fn run(args: Args, url: String, profile: PathBuf, favs: Favorites) -> Resu
 
     let mut chrome = chrome::launch(&profile, full_w, full_h).await?;
     let cdp = cdp::Cdp::connect(&chrome.ws_url).await?;
-    let downloads = home().join("Downloads");
+    let downloads = home().join("ssd/downloads");
     let pip_dir = PathBuf::from(format!("/dev/shm/fbrowse-pip-{}", std::process::id()));
     let ctrl = Controller::new(cdp, disp, downloads, pip_dir.clone());
 
