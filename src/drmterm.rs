@@ -125,7 +125,7 @@ pub fn connect() -> Option<Overlay> {
 fn try_connect(path: &str) -> Option<Overlay> {
     let mut sock = UnixStream::connect(path).ok()?;
     sock.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    sock.write_all(b"HELLO ssbrowse\n").ok()?;
+    sock.write_all(b"HELLO fbrowse\n").ok()?;
     let mut line = String::new();
     BufReader::new(sock.try_clone().ok()?).read_line(&mut line).ok()?;
     let parts: Vec<&str> = line.split_whitespace().collect();

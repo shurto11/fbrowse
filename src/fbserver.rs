@@ -1,11 +1,11 @@
 //! fb-server クライアント。
 //!
-//! `{"hello":"ssbrowse", "session":"$3", "rect":{...}}` を送って重なり調停に参加し、
+//! `{"hello":"fbrowse", "session":"$3", "rect":{...}}` を送って重なり調停に参加し、
 //! 届く `{"visible":bool, "reason":..., "clip":[...]}` を呼び出し側へ渡す。
 //! 描画領域が動いたら `{"rect":...}` を送り直す(tmux ペイン追従のため)。
 //! fb-server 未起動・切断時は 500ms ごとに張り直す。未接続の間は visible のまま。
 //!
-//! fb-server の scenes.toml が "ssbrowse" という名前で層を定義しているため、
+//! fb-server の scenes.toml が "fbrowse" という名前で層を定義しているため、
 //! その名前で名乗る。
 
 use crate::display::Rect;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
-pub const CLIENT_NAME: &str = "ssbrowse";
+pub const CLIENT_NAME: &str = "fbrowse";
 
 #[derive(Debug)]
 pub struct VisMsg {

@@ -146,9 +146,9 @@ touch-server に接続し (無ければタッチデバイスを直接読む)、�
 
 ## 他のツールとの連携
 
-- **fb-server**: `ssbrowse` の名前で接続する (`scenes.toml` の層名に合わせている)。
+- **fb-server**: `fbrowse` の名前で接続する (`scenes.toml` の層名に合わせている)。
   表示可否と描画禁止矩形 (clip) に従い、tmux セッションが切り替わったら自分の領域を消す
-- **touch-server**: 同じく `ssbrowse` として接続する
+- **touch-server**: 同じく `fbrowse` として接続する
 - **drmterm**: 共有メモリへ書き、ペインの矩形を申告して合成してもらう
 
 ## 開発用の環境変数
